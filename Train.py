@@ -16,6 +16,8 @@ from multiprocessing import Value, Pool
 from Huffman import Huffman
 
 MAX_SEN_LEN = 1000              # 允许最长句子的单词数目
+SIGMOID_TABLE_SIZE = 1000       # sigmoid查找表的大小
+SIGMOID_MAX_EXP = 6             # sigmoid的左右边界大小
 
 class UnigramTable:
 
@@ -42,13 +44,14 @@ class UnigramTable:
         indices = np.random.randint(low=0, high=len(self.table), size=count)
         return [self.table[i] for i in indices]
 
-def sigmoid(z):
-    if z > 6:
-        return 1.0
-    elif z < -6:
-        return 0.0
-    else:
-        return 1/(1 + math.exp(-z))
+class SigmoidTable:
+    """构造sigmoid表，这样每次在使用的时候就直接查表，不是计算"""
+    def build(self):
+        self.table = np.zeros(SIGMOID_TABLE_SIZE)
+        for i in range(SIGMOID_TABLE_SIZE):
+            self.table[i] = math.exp((i / SIGMOID_TABLE_SIZE * 2 - 1) * SIGMOID_MAX_EXP)
+            self.table[i] = self.table[i] / (self.table[i] + 1)
+
 
 def init_process(*params):
     """线程的初始化，将子线程需要的参数全部传递过来"""
@@ -131,8 +134,14 @@ def train_process(pid):
 
                 for target, label in classifiers:
                     z = np.dot(neu1, model.net2[target])
-                    p = sigmoid(z)
-                    g = global_alpha.value * (label - p)
+                    if z <= -SIGMOID_MAX_EXP:
+                        continue
+                    elif z >= SIGMOID_MAX_EXP:
+                        continue
+                    else:
+                        table_index = int((z + SIGMOID_MAX_EXP) * (SIGMOID_TABLE_SIZE / SIGMOID_MAX_EXP / 2))
+                    p = args.sigmoid_table[table_index]
+                    g = global_alpha.value * (1 - label - p)
                     neu1e += g * model.net2[target]
                     model.net2[target] += g * neu1
 
@@ -180,7 +189,6 @@ def train(args):
     print("Begin Training with {0} threads.".format(args.num_threads))
     args.f_input = open(args.input)
     args.start_list, args.end_list = FileUtil.FileSplit().split(args, vocab)
-    print(args.start_list)
     global_word_count = Value('i', 0)
     global_alpha = Value('f', args.alpha)
     for epoch in range(0, args.epoch):
@@ -223,6 +231,9 @@ if __name__ == '__main__':
     args.start_alpha = args.alpha
     outputFolder = Util.OutputFolder()
     outputFolder.updateArgs(args)
+    sigmoidTable = SigmoidTable()
+    sigmoidTable.build()
+    args.sigmoid_table = sigmoidTable.table
     # 正式训练
     train(args)
 
