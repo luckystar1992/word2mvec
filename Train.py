@@ -3,7 +3,7 @@
 """
 训练过程
 """
-import sys, argparse
+import sys, os, argparse
 import FileUtil
 import Util
 import Model
@@ -123,6 +123,7 @@ def train_process(pid):
             context_end = min(word_index + current_window + 1, len(tokens))
             context = tokens[context_start:word_index] + tokens[word_index + 1:context_end]
 
+            # CBOW模型
             if args.cbow:
                 neu1 = np.mean(np.array([model.net1[c] for c in context]), axis=0)
                 assert len(neu1) == args.embedding_size
@@ -148,8 +149,30 @@ def train_process(pid):
                 # 参数更新
                 for context_word in context:
                     model.net1[context_word] += neu1e
+            # Skip-Gram模型
             else:
-                pass
+                for context_word in context:
+                    neu1e = np.zeros(args.embedding_size)
+                    if args.negative > 0:
+                        classifiers = [(token, 1)] + [(target, 0) for target in args.table.sample(args.negative)]
+                    else:
+                        classifiers = zip(vocab[token].path, vocab[token].code)
+
+                    for target, label in classifiers:
+                        z = np.dot(model.net1[context_word], model.net2[target])
+                    if z <= -SIGMOID_MAX_EXP:
+                        continue
+                    elif z >= SIGMOID_MAX_EXP:
+                        continue
+                    else:
+                        table_index = int((z + SIGMOID_MAX_EXP) * (SIGMOID_TABLE_SIZE / SIGMOID_MAX_EXP / 2))
+                    p = args.sigmoid_table[table_index]
+                    g = global_alpha.value * (1 - label - p)
+                    neu1e += g * model.net2[target]
+                    model.net2[target] += g * model.net1[context_word]
+
+                model.net1[context_word] += neu1e
+
 
             word_count += 1
             global_word_count.value += 1
@@ -167,13 +190,7 @@ def train_process(pid):
     sys.stdout.flush()
 
 
-def train(args):
-    vocab = FileUtil.Vocab(args)
-    vocab.build()
-
-    singleModel = Model.SingleModel(args, vocab)
-    singleModel.init_model()
-
+def train(args, vocab):
     if args.negative > 0:
         print("Initializing Unigram Table")
         args.table = UnigramTable(vocab)
@@ -182,7 +199,9 @@ def train(args):
         print("Initializing Huffman Tree")
         huffman = Huffman(vocab)
         huffman.encode()
-    vocab.save()
+
+    singleModel = Model.SingleModel(args, vocab)
+    singleModel.init_model()
 
     # 开启多线程
     t0 = time.time()
@@ -226,14 +245,30 @@ if __name__ == '__main__':
     parser.add_argument('-binary', dest='binary', default=1, type=int, help='二进制保存词向量')
     parser.add_argument('-alpha', dest='alpha', default=0.025, type=float, help='初始alpha值')
     parser.add_argument('-out_folder', dest='out_folder', default='./out', help='模型/向量保存文件夹')
+    parser.add_argument('-vocab_path', dest='vocab_path', required=True, help='已经存在的词典')
 
     args = parser.parse_args()
     args.start_alpha = args.alpha
-    outputFolder = Util.OutputFolder()
-    outputFolder.updateArgs(args)
+
+    updateArgs = Util.UpdateArgs()
+    updateArgs.update(args)
+
+    vocab = FileUtil.Vocab(args)
+    if hasattr(args, 'vocab_path') and args.vocab_path is not None:
+        vocab_path = os.path.join(args.out_folder, args.vocab_path)
+        if os.path.exists(vocab_path):
+            vocab.loadFromFile(vocab_path)
+        else:
+            raise FileNotFoundError()
+    else:
+        vocab.build()
+        input_name = 'vocab' + Util.getFileName(args.input) + ".txt"
+        vocab_path = os.path.join(args.out_folder, input_name)
+        vocab.save(vocab_path)
+
     sigmoidTable = SigmoidTable()
     sigmoidTable.build()
     args.sigmoid_table = sigmoidTable.table
     # 正式训练
-    train(args)
+    train(args, vocab)
 

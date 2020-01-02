@@ -52,24 +52,24 @@ class SingleModel:
 
     def saveEmbedding(self, epoch):
         """保存词向量"""
-        out_folder = self.args.out_folder
-        print(" Saving {out_folder}".format(out_folder=out_folder))
+        embedding_folder = self.args.embedding_folder
+        print(" Saving {out_folder}".format(out_folder=embedding_folder))
 
         # 先将此次的训练参数保存下来
-        with open(os.path.join(out_folder, 'config.txt'), 'w') as f:
+        with open(os.path.join(embedding_folder, 'config.txt'), 'w') as f:
             for (args_key, args_value) in sorted(vars(self.args).items()):
                 if isinstance(args_value, (int, float, bool, str)):
                     f.write("%20s: %10s\n" % (args_key, str(args_value)))
 
         #  开始保存词向量
         if self.args.binary:
-            embedding_path = os.path.join(out_folder, 'wv_epoch{epoch}.bin'.format(epoch=epoch))
+            embedding_path = os.path.join(embedding_folder, 'wv_epoch{epoch}.bin'.format(epoch=epoch))
             with open(embedding_path, 'wb') as f_out:
                 f_out.write(('%d %d\n' % (len(self.net1), self.args.embedding_size)).encode())
                 for token, vector in zip(self.vocab, self.net1):
                     f_out.write(('%s %s\n' % (token.word, ' '.join([str(s) for s in vector]))).encode())
         else:
-            embedding_path = os.path.join(out_folder, 'wv_epoch{epoch}.txt'.format(epoch=epoch))
+            embedding_path = os.path.join(embedding_folder, 'wv_epoch{epoch}.txt'.format(epoch=epoch))
             with open(embedding_path, 'w') as f_out:
                 f_out.write('%d %d\n' % (len(self.net1), self.args.embedding_size))
                 for token, vector in zip(self.vocab, self.net1):
