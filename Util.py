@@ -20,8 +20,8 @@ def cos_sim(vector_a, vector_b):
     vector_b = np.mat(vector_b)
     num = float(vector_a * vector_b.T)
     denom = np.linalg.norm(vector_a) * np.linalg.norm(vector_b)
-    if denom == 0:
-        return 0
+    # if denom == 0:
+    #     return 0
     cos = num / denom
     sim = 0.5 + 0.5 * cos
     return sim
@@ -70,5 +70,8 @@ class UpdateArgs:
         # 向args中添加新的参数
         args.timestamp = timestamp
         args.embedding_folder = embedding_folder
+
+        # pre-trained 单一语境向量的epoch
+        args.pre_epoch = 1
 
 

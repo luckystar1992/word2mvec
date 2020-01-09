@@ -12,7 +12,7 @@ import numpy as np
 import time
 import warnings
 import tqdm
-from multiprocessing import Value, Pool
+from multiprocessing import Value, Pool, Lock
 from Huffman import Huffman
 
 MAX_SEN_LEN = 1000              # 允许最长句子的单词数目
@@ -191,8 +191,8 @@ def train_process(pid):
 
 def multi_init_process(*params):
     """多语境词向量模型多线程的初始化"""
-    global args, vocab, model, global_word_count, global_alpha, f_input
-    args, vocab, model, global_word_count, global_alpha = params
+    global args, vocab, model, global_word_count, global_alpha, lock, f_input
+    args, vocab, model, global_word_count, global_alpha, lock = params
 
     f_input = open(args.input, 'r')
     with warnings.catch_warnings():
@@ -229,7 +229,6 @@ def multi_train_process(pid):
         # 计算出整个句子的token所在的index
         # 如果是前面几次的话，先训练main embedeing 和 main sense
         tokens_sense_index = [0] * len(tokens_id)
-
         for index, token_id in enumerate(tokens_id):
             # 随机取上下文窗口大小
             context_start = max(index - args.window_size, 0)
@@ -238,15 +237,19 @@ def multi_train_process(pid):
             # context_end = len(tokens_id)
             context_ids = tokens_id[context_start:index] + tokens_id[index + 1:context_end]
 
+            """
+            对于出现access数目和最终的frequent不一致的情况，也能通过数据锁解释的通
+            """
             context_vector = model.getContextVector(context_ids)
             if model.senses_count[token_id] == 0:
                 model.main_sense[token_id] = context_vector
                 model.senses_count[token_id] = 1
                 model.senses_access[token_id][0] = 1
             else:
+                lock.acquire()
                 cos_max_index, cos_max_value = model.getSimilarMax(context_vector, token_id)
 
-                if cos_max_value > 0.6:
+                if cos_max_value > 0.8:
                     if cos_max_index == 0:
                         last_sense = model.main_sense[token_id]
                         last_access = model.senses_access[token_id][0]
@@ -262,6 +265,11 @@ def multi_train_process(pid):
 
                 else:
                     # 未超过senses的容量则新增加一个sense
+                    """
+                    bug fix: 需要在这里实现一个count的数据锁，要不然使用多线程的时候
+                             count每次加1的时候，多线程count可能出现多次，然后在计算
+                             getSimilarMax的时候，会用count索引访问
+                    """
                     if model.senses_count[token_id] < args.senses + 1:
                         count = model.senses_count[token_id]
                         model.senses[token_id][count - 1] = context_vector
@@ -275,23 +283,23 @@ def multi_train_process(pid):
                         model.main_sense[token_id] = (last_sense * last_access + context_vector) / (last_access + 1)
                         tokens_sense_index[index] = 0
                         model.senses_access[token_id][0] += 1
-
+                lock.release()
 
         # 对当前的句子进行遍历
         for word_index, token in enumerate(tokens_id):
             # 输出运行过程信息
-            if global_word_count.value % int(vocab.word_count / 10000) == 0:
-                sys.stdout.write(
-                    "\r𝑬-{epoch} 𝜃(⍺)={alpha_coeff:>4.2f} ⍺={alpha:>10.8f} ({current:>{len}d}/{total:>{len}d}){progress:>5.2f}٪".format(
-                        epoch=epoch,
-                        alpha_coeff=alpha_coeff,
-                        alpha=global_alpha.value,
-                        current=global_word_count.value,
-                        len=len(str(vocab.word_count)),
-                        total=vocab.word_count,
-                        progress=float(global_word_count.value) / vocab.word_count * 100
-                    ))
-                sys.stdout.flush()
+            #if global_word_count.value % int(vocab.word_count / 10000) == 0:
+            sys.stdout.write(
+                "\r𝑬-{epoch} 𝜃(⍺)={alpha_coeff:>4.2f} ⍺={alpha:>10.8f} ({current:>{len}d}/{total:>{len}d}){progress:>5.2f}٪".format(
+                    epoch=epoch,
+                    alpha_coeff=alpha_coeff,
+                    alpha=global_alpha.value,
+                    current=global_word_count.value,
+                    len=len(str(vocab.word_count)),
+                    total=vocab.word_count,
+                    progress=float(global_word_count.value) / vocab.word_count * 100
+                ))
+            sys.stdout.flush()
 
             # 更新alpha
             if word_count - last_word_count > 10000:
@@ -375,13 +383,14 @@ def multi_train(args, vocab):
     args.start_list, args.end_list = FileUtil.FileSplit().split(args, vocab)
     global_word_count = Value('i', 0)
     global_alpha = Value('f', args.alpha)
+    lock = Lock()
     for epoch in range(0, args.epoch):
         t_begin = time.time()
         global_word_count.value = 0
         args.epoch_index = epoch
         pool = Pool(processes=args.num_threads,
                     initializer=multi_init_process,
-                    initargs=(args, vocab, multiSenseModel, global_word_count, global_alpha))
+                    initargs=(args, vocab, multiSenseModel, global_word_count, global_alpha, lock))
         pool.map(multi_train_process, range(args.num_threads))
         t_end = time.time()
         print("\r𝑬-{epoch} ⍺={alpha:>10.8f} 𝑇={time:>10.2f}min  token/ps {speed:>6.1f}".format(

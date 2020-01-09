@@ -144,7 +144,6 @@ class MultiSenseModel(SingleModel):
     def getSimilarMax(self, context_vector, token):
         """将context vector与已经存在的sense比较，返回最相似的index，value"""
         current_count = self.senses_count[token]
-        # candidate_vectors = np.insert(self.senses[token][0:current_count - 1], 0, values=self.main_sense[token], axis=0)
         candidate_vectors = np.insert(self.senses[token][0:current_count - 1], 0, values=self.main_sense[token], axis=0)
         cos_list = np.array([Util.cos_sim(context_vector, v) for v in candidate_vectors])
         cos_max_index = np.argmax(cos_list)
@@ -166,6 +165,10 @@ class MultiSenseModel(SingleModel):
 
     def updateWeights(self, token_id, gradient):
         self.weights[token_id] += gradient
+
+    def clusterSense(self):
+        """对sense/embedding进行聚类和舍弃那些update次数少的"""
+        pass
 
     def saveEmbedding(self, epoch):
         """保存词向量，并将对应的语境向量也保存， 分开文件保存"""
