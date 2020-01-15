@@ -197,10 +197,10 @@ def multi_init_process(*params):
     f_input = open(args.input, 'r')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        model.senses_count = np.ctypeslib.as_array(model.senses_count)
+        #model.senses_count = np.ctypeslib.as_array(model.senses_count)
         model.senses_access = np.ctypeslib.as_array(model.senses_access)
-        model.main_embedding = np.ctypeslib.as_array(model.main_embedding)
-        model.main_sense = np.ctypeslib.as_array(model.main_sense)
+        #model.main_embedding = np.ctypeslib.as_array(model.main_embedding)
+        #model.main_sense = np.ctypeslib.as_array(model.main_sense)
         model.embedding = np.ctypeslib.as_array(model.embedding)
         model.senses = np.ctypeslib.as_array(model.senses)
         model.weights = np.ctypeslib.as_array(model.weights)
@@ -241,12 +241,12 @@ def multi_train_process(pid):
             对于出现access数目和最终的frequent不一致的情况，也能通过数据锁解释的通
             """
             context_vector = model.getContextVector(context_ids)
+            """
             if model.senses_count[token_id] == 0:
                 model.main_sense[token_id] = context_vector
                 model.senses_count[token_id] = 1
                 model.senses_access[token_id][0] = 1
             else:
-                lock.acquire()
                 cos_max_index, cos_max_value = model.getSimilarMax(context_vector, token_id)
 
                 if cos_max_value > 0.8:
@@ -265,13 +265,15 @@ def multi_train_process(pid):
 
                 else:
                     # 未超过senses的容量则新增加一个sense
-                    """
+                    
                     bug fix: 需要在这里实现一个count的数据锁，要不然使用多线程的时候
                              count每次加1的时候，多线程count可能出现多次，然后在计算
                              getSimilarMax的时候，会用count索引访问
-                    """
-                    if model.senses_count[token_id] < args.senses + 1:
-                        count = model.senses_count[token_id]
+                    bug fix: 使用lock的时候，会锁定数据，造成多线程失效，所以这里使用
+                             
+                    
+                    count = model.senses_count[token_id]
+                    if count < args.senses + 1:
                         model.senses[token_id][count - 1] = context_vector
                         tokens_sense_index[index] = count
                         model.senses_count[token_id] += 1
@@ -283,23 +285,31 @@ def multi_train_process(pid):
                         model.main_sense[token_id] = (last_sense * last_access + context_vector) / (last_access + 1)
                         tokens_sense_index[index] = 0
                         model.senses_access[token_id][0] += 1
-                lock.release()
+            """
 
+            cos_max_index, cos_max_value = model.getSimilarMax(context_vector, token_id)
+            if cos_max_value < args.sim_threshold:
+                cos_max_index = 0
+            last_sense = model.senses[token_id][cos_max_index]
+            last_access = model.senses_access[token_id][cos_max_index]
+            # model.senses[token_id][cos_max_index] = (last_sense * last_access + context_vector) / (last_access + 1)
+            model.senses[token_id][cos_max_index] = (last_sense + context_vector)/2
+            tokens_sense_index[index] = cos_max_index
         # 对当前的句子进行遍历
         for word_index, token in enumerate(tokens_id):
             # 输出运行过程信息
-            #if global_word_count.value % int(vocab.word_count / 10000) == 0:
-            sys.stdout.write(
-                "\r𝑬-{epoch} 𝜃(⍺)={alpha_coeff:>4.2f} ⍺={alpha:>10.8f} ({current:>{len}d}/{total:>{len}d}){progress:>5.2f}٪".format(
-                    epoch=epoch,
-                    alpha_coeff=alpha_coeff,
-                    alpha=global_alpha.value,
-                    current=global_word_count.value,
-                    len=len(str(vocab.word_count)),
-                    total=vocab.word_count,
-                    progress=float(global_word_count.value) / vocab.word_count * 100
-                ))
-            sys.stdout.flush()
+            if global_word_count.value % int(vocab.word_count / 10000) == 0:
+                sys.stdout.write(
+                    "\r𝑬-{epoch} 𝜃(⍺)={alpha_coeff:>4.2f} ⍺={alpha:>10.8f} ({current:>{len}d}/{total:>{len}d}){progress:>5.2f}٪".format(
+                        epoch=epoch,
+                        alpha_coeff=alpha_coeff,
+                        alpha=global_alpha.value,
+                        current=global_word_count.value,
+                        len=len(str(vocab.word_count)),
+                        total=vocab.word_count,
+                        progress=float(global_word_count.value) / vocab.word_count * 100
+                    ))
+                sys.stdout.flush()
 
             # 更新alpha
             if word_count - last_word_count > 10000:
@@ -343,10 +353,8 @@ def multi_train_process(pid):
 
                 # 参数更新
                 for context_id, sense_index in zip(context_ids, current_tokens_sense_index):
-                    if sense_index == 0:
-                        model.main_embedding[context_id] += neu1e
-                    else:
-                        model.embedding[context_id][sense_index-1] += neu1e
+                    model.embedding[context_id][sense_index] += neu1e
+                    model.senses_access[context_id][sense_index] += 1
 
             word_count += 1
             global_word_count.value += 1
@@ -364,6 +372,7 @@ def multi_train_process(pid):
 
 
 def multi_train(args, vocab):
+    """多语境模型的训练过程"""
     if args.negative > 0:
         print("Initializing Unigram Table")
         args.table = UnigramTable(vocab)
@@ -373,7 +382,7 @@ def multi_train(args, vocab):
         huffman = Huffman(vocab)
         huffman.encode()
 
-    multiSenseModel = Model.MultiSenseModel(args, vocab)
+    multiSenseModel = Model.MultiSenseModel2(args, vocab)
     multiSenseModel.init_model()
 
     # 开启多线程
@@ -406,7 +415,8 @@ def multi_train(args, vocab):
     print("Completed Training, Spend {spend_time:>10.2f} minutes.".format(spend_time=(t1-t0)/60))
 
 
-def train(args, vocab):
+def single_train(args, vocab):
+    """单一语境模型的训练过程"""
     if args.negative > 0:
         print("Initializing Unigram Table")
         args.table = UnigramTable(vocab)
@@ -451,7 +461,7 @@ def train(args, vocab):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-input', dest='input', required=True, help="训练语料的路径")
-    parser.add_argument('-cbow', dest='cbow', required=True, help='使用的模型')
+    parser.add_argument('-cbow', dest='cbow', required=True, type=int, help='使用的模型')
     parser.add_argument('-negative', dest='negative', type=int, required=True, help='求解模型的加速算法')
     parser.add_argument('-min_count', dest='min_count', type=int, help='词频最小要求值')
     parser.add_argument('-epoch', dest='epoch',  type=int, default=5, help='语料循环次数')
@@ -462,14 +472,17 @@ if __name__ == '__main__':
     parser.add_argument('-alpha', dest='alpha', default=0.025, type=float, help='初始alpha值')
     parser.add_argument('-out_folder', dest='out_folder', default='./out', help='模型/向量保存文件夹')
     parser.add_argument('-vocab_path', dest='vocab_path', required=False, help='已经存在的词典')
-    parser.add_argument('-senses', dest='senses', required=False, type=int, help='语境最多次数')
-    parser.add_argument('-senses_threshold', dest='tenses_threshold', type=int, default=-1, help='拥有多语境token的最小词频')
-
+    parser.add_argument('-senses', dest='senses', required=False, default=-1, type=int, help='语境最多次数(默认为-1是单语境模型）')
+    parser.add_argument('-senses_threshold', dest='tenses_threshold', required=False, type=int, default=10, help='拥有多语境token的最小词频')
+    parser.add_argument('-sim_threshold', dest='sim_threshold', required=False, type=float, default=0.65)
     args = parser.parse_args()
+
+    if args.cbow > 0:
+        args.alpha = 0.05
     args.start_alpha = args.alpha
 
-    updateArgs = Util.UpdateArgs()
-    updateArgs.update(args)
+    # 更新参数，主要是out_folder的自动构建
+    Util.ArgsConfig.update(args)
 
     vocab = FileUtil.Vocab(args)
     if hasattr(args, 'vocab_path') and args.vocab_path is not None:
@@ -484,9 +497,20 @@ if __name__ == '__main__':
         vocab_path = os.path.join(args.out_folder, input_name)
         vocab.save(vocab_path)
 
+    # 将sigmoid预计算的查找表计算
     sigmoidTable = SigmoidTable()
     sigmoidTable.build()
     args.sigmoid_table = sigmoidTable.table
-    # 正式训练
-    multi_train(args, vocab)
+
+    # 将配置参数保存一下
+    Util.ArgsConfig.save(args)
+
+    if args.senses == -1:
+        # 单一语境的训练
+        single_train(args, vocab)
+    else:
+        multi_train(args, vocab)
+
+
+
 

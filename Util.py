@@ -8,6 +8,7 @@ import sys, os
 import subprocess
 import datetime, time
 import numpy as np
+import math
 
 def cos_sim(vector_a, vector_b):
     """
@@ -25,6 +26,18 @@ def cos_sim(vector_a, vector_b):
     cos = num / denom
     sim = 0.5 + 0.5 * cos
     return sim
+
+def Pearson(vector1, vector2):
+    """
+    Calculating the pearson coeiffient of vec1 and vec2
+    """
+    avg1 = float(sum(vector1)) / len(vector1)
+    avg2 = float(sum(vector2)) / len(vector2)
+    sum0 = sum(map(lambda x: (x[0] - avg1) *
+                   (x[1] - avg2), zip(vector1, vector2)))
+    sum1 = sum(map(lambda x: (x - avg1) * (x - avg1), vector1))
+    sum2 = sum(map(lambda x: (x - avg2) * (x - avg2), vector2))
+    return sum0 / (math.sqrt(sum1) * math.sqrt(sum2))
 
 def getFileWordCount(file_path):
     """获取某个文件的单词个数"""
@@ -49,13 +62,14 @@ def getFileName(file_path):
     return name
 
 
-class UpdateArgs:
-    """将参数进行更新，这样在traing使用的时候，就不用管细节更新了"""
+class ArgsConfig:
+    """参数的配置类，主要更新参数和保存参数"""
 
     def __init__(self):
         pass
 
-    def update(self, args):
+    @classmethod
+    def update(cls, args):
         """更新参数"""
         # 每次词向量的保存都保存在out_folder文件夹中
         if not os.path.exists(args.out_folder):
@@ -74,4 +88,10 @@ class UpdateArgs:
         # pre-trained 单一语境向量的epoch
         args.pre_epoch = 1
 
-
+    @classmethod
+    def save(cls, args):
+        """将参数保存到当前训练结果输出目录中"""
+        with open(os.path.join(args.embedding_folder, 'config.txt'), 'w') as f:
+            for (args_key, args_value) in sorted(vars(args).items()):
+                if isinstance(args_value, (int, float, bool, str)):
+                    f.write("%20s: %10s\n" % (args_key, str(args_value)))

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="S50001">
+    <serverData>
+      <paths name="S50001">
+        <serverdata>
+          <mappings>
+            <mapping deploy="word2mvec" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="zhengyuanchun@210.77.29.130:5001">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/zhengyuanchun/code/word2mvec" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>

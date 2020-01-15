@@ -263,7 +263,7 @@ if __name__ == '__main__':
 
     args = parse.parse_args()
 
-    updateArgs = Util.UpdateArgs()
+    updateArgs = Util.ArgsConfig()
     updateArgs.update(args)
 
     # 如果是指定了词汇表路径的话，那么直接从词汇表中构造vocab

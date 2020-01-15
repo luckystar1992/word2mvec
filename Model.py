@@ -150,22 +150,6 @@ class MultiSenseModel(SingleModel):
         cos_max_value = cos_list[cos_max_index]
         return cos_max_index, cos_max_value
 
-
-    def updateEembedding(self, token_id, sense_index, gradient):
-        """更新对应语境下的词向量 + 更新对应语境向量"""
-        if sense_index == 0:
-            self.main_embedding[token_id] += gradient
-            self.main_sense[token_id] += gradient
-        else:
-            self.embedding[token_id][sense_index] += gradient
-            self.senses[token_id][sense_index] += gradient
-
-    def updateSense(self, token_id, sense_index, context_vector):
-        """更新token对应的语境向量"""
-
-    def updateWeights(self, token_id, gradient):
-        self.weights[token_id] += gradient
-
     def clusterSense(self):
         """对sense/embedding进行聚类和舍弃那些update次数少的"""
         pass
@@ -206,3 +190,85 @@ class MultiSenseModel(SingleModel):
                         f_sv.write("%s " % " ".join([str(item) for item in vector]))
                     f_sv.write("\n")
 
+
+class MultiSenseModel2(SingleModel):
+    """将senses和embedding的第一个sense当作main-sense和main-embedding"""
+
+    def __init__(self, args, vocab):
+        super(MultiSenseModel2, self).__init__(args, vocab)
+        self.senses_number = args.senses
+
+    def init_model(self):
+        # [V] 记录每个token的每个sense被访问过多少次
+        tmp = np.zeros(shape=(self.vocab_size, self.senses_number + 1), dtype='int32')
+        senses_access = np.ctypeslib.as_ctypes(tmp)
+        self.senses_access = Array(senses_access._type_, senses_access, lock=False)
+
+        # [V, senses, dim] 模型的多语境词向量
+        # 多语境的第一个词向量为main-embedding
+        tmp = np.random.uniform(low=-0.5 / self.embedding_size,
+                                high=0.5 / self.embedding_size,
+                                size=(self.vocab_size, self.senses_number + 1, self.embedding_size))
+        embedding = np.ctypeslib.as_ctypes(tmp)
+        self.embedding = Array(embedding._type_, embedding, lock=False)
+
+        # [V, senses , dim] 模型的多语境词向量对应的语境信息
+        # 语境的第一个词向量为main-sense
+        tmp = np.random.uniform(low=-0.5 / self.embedding_size,
+                                high=0.5 / self.embedding_size,
+                                size=(self.vocab_size, self.senses_number + 1, self.embedding_size))
+        senses = np.ctypeslib.as_ctypes(tmp)
+        self.senses = Array(senses._type_, senses, lock=False)
+
+        # [V, dim] 矩阵作为第二层权重
+        tmp = np.zeros(shape=(self.vocab_size, self.embedding_size))
+        weights = np.ctypeslib.as_ctypes(tmp)
+        self.weights = Array(weights._type_, weights, lock=False)
+
+    def getContextVector(self, context_ids):
+        avg_vector = np.mean([self.embedding[t][0] for t in context_ids], axis=0)
+        return avg_vector
+
+    def getSimilarMax(self, context_vector, token):
+        cos_list = np.array([Util.cos_sim(context_vector, v) for v in self.senses[token]])
+        cos_max_index = np.argmax(cos_list)
+        cos_max_value = cos_list[cos_max_index]
+        return cos_max_index, cos_max_value
+
+    def clusterSense(self):
+        pass
+
+    def saveEmbedding(self, epoch):
+        embedding_folder = self.args.embedding_folder
+        embedding_path = os.path.join(embedding_folder, 'wv_epoch{epoch}.txt'.format(epoch=epoch))
+        sense_path = os.path.join(embedding_folder, 'sv_epoch{epoch}.txt'.format(epoch=epoch))
+        count_path = os.path.join(embedding_folder, 'count_epoch{epoch}.txt'.format(epoch=epoch))
+
+        print(" Saving {out_folder}".format(out_folder=embedding_folder))
+        with open(embedding_path, 'w') as f_wv, open(sense_path, 'w') as f_sv, open(count_path, 'w') as f_count:
+            f_wv.write("%d %d\n" % (len(self.embedding), self.args.embedding_size))
+            f_sv.write("%d %d\n" % (len(self.embedding), self.args.embedding_size))
+            f_count.write("%d %d\n" % (len(self.embedding), self.args.embedding_size))
+            for index, vocab in tqdm.tqdm(enumerate(self.vocab)):
+
+                access_list = self.senses_access[index]
+                count = len([item for item in access_list if item > 0])
+                # 保存每个token的不同sense被count的次数
+                f_count.write("%s %d " % (vocab.word, count))
+                for sense_access in self.senses_access[index]:
+                    if sense_access > 0:
+                        f_count.write("%s " % sense_access)
+                f_count.write("\n")
+
+
+                f_wv.write("%s %d " % (vocab.word, count))
+                for vector, sense_access in zip(self.embedding[index], self.senses_access[index]):
+                    if sense_access > 0:
+                        f_wv.write("%s " % " ".join([str(item) for item in vector]))
+                f_wv.write("\n")
+
+                f_sv.write("%s %d " % (vocab.word, count))
+                for vector, sense_access in zip(self.senses[index], self.senses_access[index]):
+                    if sense_access > 0:
+                        f_sv.write("%s " % " ".join([str(item) for item in vector]))
+                f_sv.write("\n")
