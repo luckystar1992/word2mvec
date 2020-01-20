@@ -9,6 +9,123 @@ import tqdm
 import numpy as np
 import Util
 import argparse
+import multiprocessing
+
+WS353_Path = 'data/ws/ws353.txt'
+WS353_Rela_Path = 'data/ws/ws353_relatedness.txt'
+WS353_Sim_Path = 'data/ws/ws353_similarity.txt'
+SCWS_Path = 'data/scws/ratings.txt'
+
+class Dataset:
+
+    def __init__(self):
+        # 单一语境下使用的数据集
+        self.WS353 = list()
+        self.WS353_Rela = list()
+        self.WS353_Sim = list()
+        # SCWS数据集，在单一语境下和上下文语境下
+        self.SCWS = list()
+
+        # 直接加载各项数据集
+        self.loadWS353()
+        self.loadSCWS()
+        self.loadWS353_rela()
+        self.loadWS353_sim()
+
+    def loadWS353(self):
+        """加载ws353数据集"""
+        with open(WS353_Path) as f:
+            for line in f.readlines():
+                _word1, _word2, _score = line.strip().split("\t")
+                self.WS353.append((_word1, _word2, _score))
+
+    def loadWS353_rela(self):
+        """加载ws353相关性的数据集"""
+        with open(WS353_Rela_Path) as f:
+            for line in f.readlines():
+                _word1, _word2, _score = line.strip().split("\t")
+                self.WS353_Rela.append((_word1, _word2, _score))
+
+    def loadWS353_sim(self):
+        with open(WS353_Sim_Path) as f:
+            for line in f.readlines():
+                _word1, _word2, _score = line.strip().split("\t")
+                self.WS353_Sim.append((_word1, _word2, _score))
+
+    def loadSCWS(self):
+        with open(SCWS_Path) as f:
+            for line in f.readlines():
+                _index, _word1, _pos1, _word2, _pos2, _sen1, _sen2, _score, *_scores = line.strip().split("\t")
+                assert len(_scores) == 10
+                self.SCWS.append((_word1, _pos1, _word2, _pos2, _sen1, _sen2, _score))
+
+class Evaluation:
+    """使用多线程评测SCWS的加速"""
+    def __init__(self, dataset, embedding, threads, use_context):
+        self.dataset = dataset
+        self.embedding = embedding
+        self.use_context = use_context
+
+        scws_len = len(self.dataset.SCWS)
+        interval = int(scws_len/threads)
+        sub_index = range(0, scws_len + interval, interval)
+        self.start_list = sub_index[0:-1]
+        self.end_list = sub_index[1:]
+        self.lock = multiprocessing.Lock()
+
+        manager = multiprocessing.Manager()
+        result_list = manager.list()
+        hit_list = manager.list((0, 0))
+        jobs = list()
+        for thread_index in range(0, len(self.start_list)):
+            jobs.append(multiprocessing.Process(target=self.worker, args=(thread_index, result_list, hit_list)))
+
+        for job in jobs:
+            job.start()
+        for job in jobs:
+            job.join()
+
+        pred_list, real_list = list(), list()
+        for (real, pred) in result_list:
+            pred_list.append(pred)
+            real_list.append(real)
+        total = len(self.dataset.SCWS)
+        real = len(pred_list)
+        pearson = Util.Pearson(real_list, pred_list)
+        print('{hit1}-{hit2}/{real}/{total} pearson:{p}'.format(hit1=hit_list[0], hit2=hit_list[1], real=real, total=total, p=pearson))
+
+    def getSubSCWS(self, thread_index):
+        """获取子子线程需要处理的SCWS行数"""
+        start = self.start_list[thread_index]
+        end = self.end_list[thread_index]
+        return self.dataset.SCWS[start:end]
+
+    def worker(self, thread_index, result_list, hit_list):
+        """实际的工作子线程"""
+        sub_scws_list = self.getSubSCWS(thread_index)
+        for (_word1, _pos1, _word2, _pos2, _sen1, _sen2, _score) in sub_scws_list:
+            if _word1 in self.embedding.vocab and _word2 in self.embedding.vocab:
+                if self.use_context:
+                    context_embedding1 = self.embedding.get_context_embedding(_sen1)
+                    context_embedding2 = self.embedding.get_context_embedding(_sen2)
+                    vector1, use_sense_embedding = self.embedding.get_sim_sense_embedding(context_embedding1, _word1)
+                    if use_sense_embedding:
+                        # 注意这里使用进程同步锁，防止出现计数错误的现象
+                        self.lock.acquire()
+                        hit_list[0] += 1
+                        self.lock.release()
+                    vector2, use_sense_embedding = self.embedding.get_sim_sense_embedding(context_embedding2, _word2)
+                    if use_sense_embedding:
+                        self.lock.acquire()
+                        hit_list[1] += 1
+                        self.lock.release()
+                else:
+                    vector1 = self.embedding.embedding["{word}_1".format(word=_word1)]
+                    vector2 = self.embedding.embedding["{word}_1".format(word=_word2)]
+                pred_sim = Util.cos_sim(vector1, vector2)
+                # 在这里append的时候一定要将两者同时append到list中去，如果是两个不同的
+                # list的话，多线程会出现错位的现象
+                result_list.append((pred_sim, float(_score)))
 
 class SingleEmbedding:
     """单一语境词向量"""
@@ -202,27 +319,27 @@ class MultiEmbedding:
         context_embedding = np.mean(left_context_embedding[0:5] + right_context_embedding[0:5], axis=0)
         return context_embedding
 
-    def get_sim_sense_embedding(self, context_embedding, word, first_sen):
+    def get_sim_sense_embedding(self, context_embedding, word):
         """"""
+        use_sense_embedding = False
         cos_sim_list = [Util.cos_sim(context_embedding, vector) for vector in self.senses[word]]
         cos_max_index = np.argmax(cos_sim_list)
         cos_max_value = cos_sim_list[cos_max_index]
         if cos_max_value < 0.5:
-            return self.embedding['{0}_1'.format(word)]
+            use_sense_embedding = False
+            return self.embedding['{0}_1'.format(word)], use_sense_embedding
         else:
             if cos_max_index == 0:
-                return self.embedding['{0}_1'.format(word)]
+                use_sense_embedding = False
+                return self.embedding['{0}_1'.format(word)], use_sense_embedding
             else:
-                if first_sen:
-                    self.hit1 += 1
-                else:
-                    self.hit2 += 1
+                use_sense_embedding = True
                 main_embedding = self.embedding['{0}_1'.format(word)]
                 sense_embedding = self.embedding['{0}_{1}'.format(word, cos_max_index + 1)]
                 access_total = sum(self.senses_access[word])
                 main_access = self.senses_access[word][0]
                 sense_access = self.senses_access[word][cos_max_index]
-                return main_access*(main_access/access_total) + sense_embedding*(sense_access/access_total)
+                return main_access*(main_access/access_total) + sense_embedding*(sense_access/access_total), use_sense_embedding
 
 
     def evalSCWS(self, scws_path, use_main):
@@ -247,8 +364,12 @@ class MultiEmbedding:
                     else:
                         context_embedding1 = self.get_context_embedding(_sen1)
                         context_embedding2 = self.get_context_embedding(_sen2)
-                        vector_1 = self.get_sim_sense_embedding(context_embedding1, _word1, True)
-                        vector_2 = self.get_sim_sense_embedding(context_embedding2, _word2, False)
+                        vector_1, use_sense_embedding = self.get_sim_sense_embedding(context_embedding1, _word1)
+                        if use_sense_embedding:
+                            self.hit1 += 1
+                        vector_2, use_sense_embedding = self.get_sim_sense_embedding(context_embedding2, _word2)
+                        if use_sense_embedding:
+                            self.hit2 += 1
                     real_sim_list.append(float(_score))
                     pred_sim_list.append(Util.cos_sim(vector_1, vector_2))
 
@@ -262,6 +383,7 @@ if __name__ == "__main__":
     parser.add_argument("-day", dest='day', required=True, type=str, help="词向量的文件路径中的天数")
     parser.add_argument("-time", dest='time', required=True, type=str, help="词向量路径中的时间戳")
     parser.add_argument("-epoch", dest='epoch', required=True, type=str, help="训练词向量的次数")
+    parser.add_argument("-threads", dest='threads', required=True, type=int, help="评测SCWS时候用多线程")
     args = parser.parse_args()
 
     ws353 = './data/ws/ws353.txt'
@@ -277,8 +399,14 @@ if __name__ == "__main__":
 
         embedding = MultiEmbedding()
         embedding.load('out/training_2020{0}-{1}'.format(args.day, args.time), args.epoch)
-        embedding.evalWS353('./data/ws/ws353.txt', use_avg=False)
-        embedding.evalWS353('./data/ws/ws353.txt', use_avg=True)
-        embedding.evalSCWS('./data/scws/ratings.txt', use_main=True)
-        embedding.evalSCWS('./data/scws/ratings.txt', use_main=False)
+        print("Multiple embedding loading success.")
+        # embedding.evalWS353('./data/ws/ws353.txt', use_avg=False)
+        # embedding.evalWS353('./data/ws/ws353.txt', use_avg=True)
+        # embedding.evalSCWS('./data/scws/ratings.txt', use_main=True)
+        # embedding.evalSCWS('./data/scws/ratings.txt', use_main=False)
 
+    dataset = Dataset()
+    # embedding = MultiEmbedding()
+    # embedding.load('out/training_2020{0}-{1}'.format(args.day, args.time), args.epoch)
+
+    eval = Evaluation(dataset, embedding, args.threads, use_context=True)
