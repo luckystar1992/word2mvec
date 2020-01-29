@@ -5,11 +5,15 @@
 """
 
 import sys, os
+import time
 import tqdm
 import numpy as np
 import Util
 import argparse
 import multiprocessing
+from multiprocessing import Array, Value, Pool
+import numpy as np
+import warnings
 
 WS353_Path = 'data/ws/ws353.txt'
 WS353_Rela_Path = 'data/ws/ws353_relatedness.txt'
@@ -78,12 +82,11 @@ class Evaluation:
         hit_list = manager.list((0, 0))
         jobs = list()
         for thread_index in range(0, len(self.start_list)):
-            jobs.append(multiprocessing.Process(target=self.worker, args=(thread_index, result_list, hit_list)))
-
-        for job in jobs:
+            job = multiprocessing.Process(target=self.worker, args=(thread_index, result_list, hit_list))
             job.start()
-        for job in jobs:
-            job.join()
+            jobs.append(job)
+        for thread_index in range(0, len(self.start_list)):
+            jobs[thread_index].join()
 
         pred_list, real_list = list(), list()
         for (real, pred) in result_list:
@@ -203,60 +206,136 @@ class SingleEmbedding:
         pearson = Util.Pearson(pred_sim_list, real_sim_list)
         print("{real}/{total} pearson:{p}".format(real=real, total=total, p=pearson))
 
-class MultiEmbedding:
-    """多语境词向量"""
 
-    def __init__(self):
+
+def init_worker(*params):
+    """MultiEmbedding load2方法中的子线程初始化方法"""
+    global wvlines, svlines, embeddingArray, sensesArray, args
+    wvlines, svlines, embeddingArray, sensesArray, args = params
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        embeddingArray = np.ctypeslib.as_array(embeddingArray)
+        sensesArray = np.ctypeslib.as_array(sensesArray)
+
+
+def run_worker(thread_index):
+    """MultiEmbedding load2方法中的子线程的工作函数"""
+    start = args.start_list[thread_index]
+    end = args.end_list[thread_index]
+    worker_lines = wvlines[start:end]
+    for line_index, line in enumerate(worker_lines):
+        word, sense_count, vectors = line.strip().split(" ", 2)
+        sense_count = int(sense_count)
+        sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, args.embedding_size))
+        array_index = start + line_index
+        for sense_index, vector in enumerate(sense_vectors):
+            embeddingArray[array_index][sense_index] = vector
+    worker_lines = svlines[start:end]
+    for line_index, line in enumerate(worker_lines):
+        word, sense_count, vectors = line.strip().split(" ", 2)
+        sense_count = int(sense_count)
+        sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, args.embedding_size))
+        array_index = start + line_index
+        for sense_index, vector in enumerate(sense_vectors):
+            sensesArray[array_index][sense_index] = vector
+
+
+class MultiEmbedding:
+    """
+        多语境词向量的加载评测
+    """
+
+    def __init__(self, args):
+        self.args = args
         self.embedding = dict()
         self.senses = dict()
         self.senses_access = dict()
         self.senses_count = dict()
         self.vocab = list()
 
-    def load(self, folder, epoch):
-        """
-        加载多语境词向量、多语境语境向量、词向量被access中的次数
-        :param folder: traning文件夹下的目录
-        :param epoch:  第几次循环
-        :return:
-        """
+        folder = os.path.join('out/training_2020{day}-{time}'.format(day=args.day, time=args.time))
+        epoch = args.epoch
         self.wv_path = os.path.join(folder, "wv_epoch{epoch}.txt".format(epoch=epoch))
         self.sv_path = os.path.join(folder, "sv_epoch{epoch}.txt".format(epoch=epoch))
         self.count_path = os.path.join(folder, "count_epoch{epoch}.txt".format(epoch=epoch))
 
-        with open(self.wv_path) as f:
+        # 读取单词列表，senses计数和access计数
+        with open(self.count_path) as f:
             lines = f.readlines()
-            vocab_size, embedding_size = lines[0].strip().split(" ", 1)
-            vocab_size = int(vocab_size)
-            self.vocab_size = vocab_size
-            embedding_size = int(embedding_size)
-            self.embedding_size = embedding_size
-
+            _vocab_size, _embedding_size = lines[0].strip().split(" ", 1)
+            self.vocab_size = int(_vocab_size)
+            self.embedding_size = int(_embedding_size)
             for line in lines[1:]:
-                word, sense_count, vectors = line.strip().split(" ", 2)
-                sense_count = int(sense_count)
+                word, sense_count, vector = line.strip().split(" ", 2)
                 self.vocab.append(word)
                 self.senses_count[word] = int(sense_count)
-                sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, embedding_size))
+                access_vector = np.array(vector.split(" ")).astype(int)
+                self.senses_access[word] = access_vector
+
+    def load1(self):
+        """
+            使用单线程技术加载词向量
+        """
+        with open(self.wv_path) as f:
+            lines = f.readlines()
+            for line in tqdm.tqdm(lines[1:]):
+                word, sense_count, vectors = line.strip().split(" ", 2)
+                sense_count = int(sense_count)
+                sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((self.senses_count[word], self.embedding_size))
                 for index in range(sense_count):
                     vector = sense_vectors[index]
                     self.embedding['%s_%d' % (word, index + 1)] = vector
 
         with open(self.sv_path) as f:
             lines = f.readlines()
-            for line in lines[1:]:
+            for line in tqdm.tqdm(lines[1:]):
                 word, sense_count, vectors = line.strip().split(" ", 2)
-                sense_count = int(sense_count)
-                sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, embedding_size))
+                sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((self.senses_count[word], self.embedding_size))
                 self.senses[word] = sense_vectors
 
-        with open(self.count_path) as f:
-            lines = f.readlines()
-            for line in lines[1:]:
-                word, sense_count, vector = line.strip().split(" ", 2)
-                access_vector = np.array(vector.split(" ")).astype(int)
-                self.senses_access[word] = access_vector
+    def load2(self):
+        """
+        使用多线程技术加载
+        """
+        # 利用multiprocessing的Array进行并行化处理
+        # 这里为了简便操作，将每个word的sense数目预先增加到固定数目，最终使用的时候再通过实际的count取用
+        max_count = max(self.senses_count.values())
+        tmp = np.zeros(shape=(self.vocab_size, max_count, self.embedding_size), dtype='float32')
+        embedding = np.ctypeslib.as_ctypes(tmp)
+        embeddingArray = Array(embedding._type_, embedding, lock=False)
 
+        tmp = np.zeros(shape=(self.vocab_size, max_count, self.embedding_size), dtype='float32')
+        senses = np.ctypeslib.as_ctypes(tmp)
+        sensesArray = Array(senses._type_, senses, lock=False)
+
+        with open(self.wv_path) as f_wv, open(self.sv_path) as f_sv:
+            wvlines = f_wv.readlines()
+            svlines = f_sv.readlines()
+            wvlines = wvlines[1:]
+            svlines = svlines[1:]
+
+        # 处理各个子线程读取的文件开始和结尾并将这些参数放到args中
+        interval = int(self.vocab_size / self.args.threads)
+        line_index = range(0, self.vocab_size + interval, interval)
+        args.start_list = line_index[0:-1]
+        args.end_list = line_index[1:]
+        args.embedding_size = self.embedding_size
+        pool = Pool(processes=24,
+                    initializer=init_worker,
+                    initargs=(wvlines, svlines, embeddingArray, sensesArray, args))
+        pool.map(run_worker, range(0, args.threads))
+
+        embeddingArray = np.array(embeddingArray)
+        sensesArray = np.array(sensesArray)
+
+        for word_index, (word, wv_vectors, sv_vectors) in enumerate(zip(self.vocab, embeddingArray, sensesArray)):
+            count = self.senses_count[word]
+            sense_list = list()
+            for count_index in range(0, count):
+                self.embedding['{0}_{1}'.format(word, count_index+1)] = embeddingArray[word_index][count_index]
+                sense_list.append(sensesArray[word_index][count_index])
+            self.senses['{0}'.format(word)] = np.array(sense_list)
 
     def most_similar(self, word, top_n=5):
         if word not in self.vocab:
@@ -344,7 +423,7 @@ class MultiEmbedding:
 
     def evalSCWS(self, scws_path, use_main):
         """
-        多语境词向量的scws评测
+        多语境词向量的scws评测，这是单线程的评测方法，使用的时候请使用多线程的Evaluation类
         :param scws_path:
         :param use_main:  所有的多语境词向量使用第一个main词向量
         :return:
@@ -396,17 +475,25 @@ if __name__ == "__main__":
         embedding.evalWS353(ws353)
         embedding.evalSCWS(scws)
     else:
+        t_begin = time.time()
+        embedding = MultiEmbedding(args)
+        embedding.load1()
+        dataset = Dataset()
+        eval = Evaluation(dataset, embedding, args.threads, use_context=True)
+        t_end = time.time()
+        print(t_end - t_begin)
 
-        embedding = MultiEmbedding()
-        embedding.load('out/training_2020{0}-{1}'.format(args.day, args.time), args.epoch)
-        print("Multiple embedding loading success.")
-        # embedding.evalWS353('./data/ws/ws353.txt', use_avg=False)
-        # embedding.evalWS353('./data/ws/ws353.txt', use_avg=True)
-        # embedding.evalSCWS('./data/scws/ratings.txt', use_main=True)
-        # embedding.evalSCWS('./data/scws/ratings.txt', use_main=False)
+        t_begin = time.time()
+        embedding = MultiEmbedding(args)
+        embedding.load2()
+        eval = Evaluation(dataset, embedding, args.threads, use_context=True)
+        t_end = time.time()
+        print(t_end - t_begin)
 
-    dataset = Dataset()
-    # embedding = MultiEmbedding()
-    # embedding.load('out/training_2020{0}-{1}'.format(args.day, args.time), args.epoch)
+        t_begin = time.time()
+        embedding = MultiEmbedding(args)
+        embedding.load2()
+        embedding.evalSCWS(SCWS_Path, False)
+        t_end = time.time()
+        print(t_end - t_begin)
 
-    eval = Evaluation(dataset, embedding, args.threads, use_context=True)
