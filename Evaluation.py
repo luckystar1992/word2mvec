@@ -130,6 +130,78 @@ class Evaluation:
                 # list的话，多线程会出现错位的现象
                 result_list.append((pred_sim, float(_score)))
 
+
+class Evaluation2:
+
+    def __init__(self, args, dataset, embedding, use_context):
+        self.args = args
+        self.dataset = dataset
+        self.embedding = embedding
+        self.use_context = use_context
+        self.real = 0
+        self.total = len(self.embedding.vocab)
+        self.realSCWS = list()
+
+        # 先排查哪些scws的word1和word2不在embedding中
+        for sample in self.dataset.SCWS:
+            if sample[0] in self.embedding.vocab and sample[2] in self.embedding.vocab:
+                self.realSCWS.append(sample)
+        print(len(self.realSCWS))
+        # 建立共享内存用于多线程worker的共享使用  两个列向量，real sim 和 pred sim 两个相似度
+        tmp = np.zeros(shape=(len(self.realSCWS), 2))
+        simArray = np.ctypeslib.as_ctypes(tmp)
+        simArray = Array(simArray._type_, simArray, lock=False)
+
+        # 计算每个线程处理的有效scws的行起终点
+        interval = int(np.ceil(len(self.realSCWS)/args.threads))
+        line_index = range(0, len(self.realSCWS) + interval, interval)
+
+        # 更新参数项
+        args.start_list = line_index[0:-1]
+        args.end_list = line_index[1:]
+        args.use_context = use_context
+
+        pool = Pool(processes=self.args.threads,
+                    initializer=Evaluation2.init_worker2,
+                    initargs=(args, embedding, self.realSCWS, simArray))
+        pool.map(Evaluation2.run_worker2, range(0, self.args.threads))
+
+        pred_list = [item[0] for item in simArray]
+        real_list = [item[1] for item in simArray]
+        print(Util.Pearson(pred_list, real_list))
+
+    @classmethod
+    def init_worker2(cls, *params):
+        global args, embedding, scws, simArray
+        args, embedding, scws, simArray = params
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            simArray = np.ctypeslib.as_array(simArray)
+
+    @classmethod
+    def run_worker2(cls, thread_index):
+        start = args.start_list[thread_index]
+        end = args.end_list[thread_index]
+        for index, (_word1, _pos1, _word2, _pos2, _sen1, _sen2, _score) in enumerate(scws[start: end]):
+            if args.use_context:
+                context_embedding1 = embedding.get_context_embedding(_sen1)
+                context_embedding2 = embedding.get_context_embedding(_sen2)
+                vector1, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding1, _word1)
+                if use_sense_embedding:
+                    pass
+                vector2, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding2, _word2)
+                if use_sense_embedding:
+                    pass
+            else:
+                vector1 = embedding.embedding["{word}_1".format(word=_word1)]
+                vector2 = embedding.embedding["{word}_1".format(word=_word2)]
+            pred_sim = Util.cos_sim(vector1, vector2)
+            # 在这里append的时候一定要将两者同时append到list中去，如果是两个不同的
+            # list的话，多线程会出现错位的现象
+            simArray[start+index][0] = pred_sim
+            simArray[start+index][1] = float(_score)
+
 class SingleEmbedding:
     """单一语境词向量"""
 
@@ -208,37 +280,6 @@ class SingleEmbedding:
 
 
 
-def init_worker(*params):
-    """MultiEmbedding load2方法中的子线程初始化方法"""
-    global wvlines, svlines, embeddingArray, sensesArray, args
-    wvlines, svlines, embeddingArray, sensesArray, args = params
-
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', RuntimeWarning)
-        embeddingArray = np.ctypeslib.as_array(embeddingArray)
-        sensesArray = np.ctypeslib.as_array(sensesArray)
-
-
-def run_worker(thread_index):
-    """MultiEmbedding load2方法中的子线程的工作函数"""
-    start = args.start_list[thread_index]
-    end = args.end_list[thread_index]
-    worker_lines = wvlines[start:end]
-    for line_index, line in enumerate(worker_lines):
-        word, sense_count, vectors = line.strip().split(" ", 2)
-        sense_count = int(sense_count)
-        sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, args.embedding_size))
-        array_index = start + line_index
-        for sense_index, vector in enumerate(sense_vectors):
-            embeddingArray[array_index][sense_index] = vector
-    worker_lines = svlines[start:end]
-    for line_index, line in enumerate(worker_lines):
-        word, sense_count, vectors = line.strip().split(" ", 2)
-        sense_count = int(sense_count)
-        sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, args.embedding_size))
-        array_index = start + line_index
-        for sense_index, vector in enumerate(sense_vectors):
-            sensesArray[array_index][sense_index] = vector
 
 
 class MultiEmbedding:
@@ -321,10 +362,10 @@ class MultiEmbedding:
         args.start_list = line_index[0:-1]
         args.end_list = line_index[1:]
         args.embedding_size = self.embedding_size
-        pool = Pool(processes=24,
-                    initializer=init_worker,
+        pool = Pool(processes=self.args.threads,
+                    initializer=MultiEmbedding.init_worker,
                     initargs=(wvlines, svlines, embeddingArray, sensesArray, args))
-        pool.map(run_worker, range(0, args.threads))
+        pool.map(MultiEmbedding.run_worker, range(0, args.threads))
 
         embeddingArray = np.array(embeddingArray)
         sensesArray = np.array(sensesArray)
@@ -336,6 +377,40 @@ class MultiEmbedding:
                 self.embedding['{0}_{1}'.format(word, count_index+1)] = embeddingArray[word_index][count_index]
                 sense_list.append(sensesArray[word_index][count_index])
             self.senses['{0}'.format(word)] = np.array(sense_list)
+
+    @classmethod
+    def init_worker(cls, *params):
+        """MultiEmbedding load2方法中的子线程初始化方法"""
+        global wvlines, svlines, embeddingArray, sensesArray, args
+        wvlines, svlines, embeddingArray, sensesArray, args = params
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            embeddingArray = np.ctypeslib.as_array(embeddingArray)
+            sensesArray = np.ctypeslib.as_array(sensesArray)
+
+    @classmethod
+    def run_worker(self, thread_index):
+        """MultiEmbedding load2方法中的子线程的工作函数"""
+        start = args.start_list[thread_index]
+        end = args.end_list[thread_index]
+        worker_lines = wvlines[start:end]
+        for line_index, line in enumerate(worker_lines):
+            word, sense_count, vectors = line.strip().split(" ", 2)
+            sense_count = int(sense_count)
+            sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, args.embedding_size))
+            array_index = start + line_index
+            for sense_index, vector in enumerate(sense_vectors):
+                embeddingArray[array_index][sense_index] = vector
+        worker_lines = svlines[start:end]
+        for line_index, line in enumerate(worker_lines):
+            word, sense_count, vectors = line.strip().split(" ", 2)
+            sense_count = int(sense_count)
+            sense_vectors = np.array(vectors.split(" ")).astype(float).reshape((sense_count, args.embedding_size))
+            array_index = start + line_index
+            for sense_index, vector in enumerate(sense_vectors):
+                sensesArray[array_index][sense_index] = vector
+
 
     def most_similar(self, word, top_n=5):
         if word not in self.vocab:
@@ -475,25 +550,30 @@ if __name__ == "__main__":
         embedding.evalWS353(ws353)
         embedding.evalSCWS(scws)
     else:
+        # t_begin = time.time()
+        # embedding = MultiEmbedding(args)
+        # embedding.load1()
+        # dataset = Dataset()
+        # eval = Evaluation(dataset, embedding, args.threads, use_context=True)
+        # t_end = time.time()
+        # print(t_end - t_begin)
+        #
+        # t_begin = time.time()
+        # embedding = MultiEmbedding(args)
+        # embedding.load2()
+        # eval = Evaluation(dataset, embedding, args.threads, use_context=True)
+        # t_end = time.time()
+        # print(t_end - t_begin)
         t_begin = time.time()
         embedding = MultiEmbedding(args)
-        embedding.load1()
+        embedding.load2()
+        t_end = time.time()
+        print(t_end - t_begin)
+
+        t_begin = time.time()
         dataset = Dataset()
-        eval = Evaluation(dataset, embedding, args.threads, use_context=True)
-        t_end = time.time()
-        print(t_end - t_begin)
-
-        t_begin = time.time()
-        embedding = MultiEmbedding(args)
-        embedding.load2()
-        eval = Evaluation(dataset, embedding, args.threads, use_context=True)
-        t_end = time.time()
-        print(t_end - t_begin)
-
-        t_begin = time.time()
-        embedding = MultiEmbedding(args)
-        embedding.load2()
-        embedding.evalSCWS(SCWS_Path, False)
+        eval = Evaluation2(args, dataset, embedding, True)
+        # eval = Evaluation(dataset, embedding, args.threads, use_context=True)
         t_end = time.time()
         print(t_end - t_begin)
 
