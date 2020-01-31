@@ -2,6 +2,8 @@
 
 """
 衡量训练的词向量质量
+加载词向量的方式一共有两种，一种是单线程加载技术，Multiple load1，一种是多线程加载 load2
+衡量scws的方式也是有两种，一种是利用Manager共享变量，一种是利用Array共享内存
 """
 
 import sys, os
@@ -95,7 +97,7 @@ class Evaluation:
         total = len(self.dataset.SCWS)
         real = len(pred_list)
         pearson = Util.Pearson(real_list, pred_list)
-        print('{hit1}-{hit2}/{real}/{total} pearson:{p}'.format(hit1=hit_list[0], hit2=hit_list[1], real=real, total=total, p=pearson))
+        print('{hit1}-{hit2}/{real}/{total} pearson:{p:>6.4f}'.format(hit1=hit_list[0], hit2=hit_list[1], real=real, total=total, p=pearson))
 
     def getSubSCWS(self, thread_index):
         """获取子子线程需要处理的SCWS行数"""
@@ -146,7 +148,6 @@ class Evaluation2:
         for sample in self.dataset.SCWS:
             if sample[0] in self.embedding.vocab and sample[2] in self.embedding.vocab:
                 self.realSCWS.append(sample)
-        print(len(self.realSCWS))
         # 建立共享内存用于多线程worker的共享使用  两个列向量，real sim 和 pred sim 两个相似度
         tmp = np.zeros(shape=(len(self.realSCWS), 2))
         simArray = np.ctypeslib.as_ctypes(tmp)
@@ -156,22 +157,32 @@ class Evaluation2:
         interval = int(np.ceil(len(self.realSCWS)/args.threads))
         line_index = range(0, len(self.realSCWS) + interval, interval)
 
-        # 更新参数项
+        # 更新参数项并将需要统计的word1和word2的命中统计数目更新到args中
         args.start_list = line_index[0:-1]
         args.end_list = line_index[1:]
         args.use_context = use_context
+        word1_hit, word2_hit = Value('i', 0), Value('i', 0)
+        args.word1_hit = word1_hit
+        args.word2_hit = word2_hit
 
         pool = Pool(processes=self.args.threads,
-                    initializer=Evaluation2.init_worker2,
+                    initializer=Evaluation2.init_worker,
                     initargs=(args, embedding, self.realSCWS, simArray))
-        pool.map(Evaluation2.run_worker2, range(0, self.args.threads))
+        pool.map(Evaluation2.run_worker, range(0, self.args.threads))
 
         pred_list = [item[0] for item in simArray]
         real_list = [item[1] for item in simArray]
-        print(Util.Pearson(pred_list, real_list))
+        # 最后统计
+        hit1 = args.word1_hit.value
+        hit2 = args.word2_hit.value
+        real = len(self.realSCWS)
+        total = len(self.dataset.SCWS)
+        pearson = Util.Pearson(pred_list, real_list)
+        print('{hit1}-{hit2}/{real}/{total} pearson:{p:>6.4f}'.format(hit1=hit1, hit2=hit2, real=real,
+                                                                total=total, p=pearson))
 
     @classmethod
-    def init_worker2(cls, *params):
+    def init_worker(cls, *params):
         global args, embedding, scws, simArray
         args, embedding, scws, simArray = params
 
@@ -180,7 +191,7 @@ class Evaluation2:
             simArray = np.ctypeslib.as_array(simArray)
 
     @classmethod
-    def run_worker2(cls, thread_index):
+    def run_worker(cls, thread_index):
         start = args.start_list[thread_index]
         end = args.end_list[thread_index]
         for index, (_word1, _pos1, _word2, _pos2, _sen1, _sen2, _score) in enumerate(scws[start: end]):
@@ -189,10 +200,10 @@ class Evaluation2:
                 context_embedding2 = embedding.get_context_embedding(_sen2)
                 vector1, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding1, _word1)
                 if use_sense_embedding:
-                    pass
+                    args.word1_hit.value += 1
                 vector2, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding2, _word2)
                 if use_sense_embedding:
-                    pass
+                    args.word2_hit.value += 1
             else:
                 vector1 = embedding.embedding["{word}_1".format(word=_word1)]
                 vector2 = embedding.embedding["{word}_1".format(word=_word2)]
@@ -277,9 +288,6 @@ class SingleEmbedding:
                     pred_sim_list.append(Util.cos_sim(vector_1, vector_2))
         pearson = Util.Pearson(pred_sim_list, real_sim_list)
         print("{real}/{total} pearson:{p}".format(real=real, total=total, p=pearson))
-
-
-
 
 
 class MultiEmbedding:
@@ -479,7 +487,7 @@ class MultiEmbedding:
         cos_sim_list = [Util.cos_sim(context_embedding, vector) for vector in self.senses[word]]
         cos_max_index = np.argmax(cos_sim_list)
         cos_max_value = cos_sim_list[cos_max_index]
-        if cos_max_value < 0.5:
+        if cos_max_value < 0.1:
             use_sense_embedding = False
             return self.embedding['{0}_1'.format(word)], use_sense_embedding
         else:
@@ -493,7 +501,8 @@ class MultiEmbedding:
                 access_total = sum(self.senses_access[word])
                 main_access = self.senses_access[word][0]
                 sense_access = self.senses_access[word][cos_max_index]
-                return main_access*(main_access/access_total) + sense_embedding*(sense_access/access_total), use_sense_embedding
+                return main_access*(main_embedding/access_total) + sense_embedding*(sense_access/access_total), use_sense_embedding
+                # return main_embedding * 0.5 + sense_embedding * 0.5, use_sense_embedding
 
 
     def evalSCWS(self, scws_path, use_main):
@@ -528,7 +537,7 @@ class MultiEmbedding:
                     pred_sim_list.append(Util.cos_sim(vector_1, vector_2))
 
         pearson = Util.Pearson(pred_sim_list, real_sim_list)
-        print('{hit1}-{hit2}/{real}/{total} pearson:{p}'.format(hit1=self.hit1, hit2=self.hit2, real=real, total=total, p=pearson))
+        print('{hit1}-{hit2}/{real}/{total} pearson:{p:>6.4f}'.format(hit1=self.hit1, hit2=self.hit2, real=real, total=total, p=pearson))
 
 if __name__ == "__main__":
 
@@ -550,30 +559,12 @@ if __name__ == "__main__":
         embedding.evalWS353(ws353)
         embedding.evalSCWS(scws)
     else:
-        # t_begin = time.time()
-        # embedding = MultiEmbedding(args)
-        # embedding.load1()
-        # dataset = Dataset()
-        # eval = Evaluation(dataset, embedding, args.threads, use_context=True)
-        # t_end = time.time()
-        # print(t_end - t_begin)
-        #
-        # t_begin = time.time()
-        # embedding = MultiEmbedding(args)
-        # embedding.load2()
-        # eval = Evaluation(dataset, embedding, args.threads, use_context=True)
-        # t_end = time.time()
-        # print(t_end - t_begin)
         t_begin = time.time()
         embedding = MultiEmbedding(args)
         embedding.load2()
-        t_end = time.time()
-        print(t_end - t_begin)
-
-        t_begin = time.time()
         dataset = Dataset()
         eval = Evaluation2(args, dataset, embedding, True)
-        # eval = Evaluation(dataset, embedding, args.threads, use_context=True)
+        eval2 = Evaluation2(args, dataset, embedding, False)
         t_end = time.time()
         print(t_end - t_begin)
 
