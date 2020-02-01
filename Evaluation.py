@@ -97,6 +97,7 @@ class Evaluation:
         total = len(self.dataset.SCWS)
         real = len(pred_list)
         pearson = Util.Pearson(real_list, pred_list)
+        self.pearson = pearson
         print('{hit1}-{hit2}/{real}/{total} pearson:{p:>6.4f}'.format(hit1=hit_list[0], hit2=hit_list[1], real=real, total=total, p=pearson))
 
     def getSubSCWS(self, thread_index):
@@ -178,6 +179,7 @@ class Evaluation2:
         real = len(self.realSCWS)
         total = len(self.dataset.SCWS)
         pearson = Util.Pearson(pred_list, real_list)
+        self.pearson = pearson
         print('{hit1}-{hit2}/{real}/{total} pearson:{p:>6.4f}'.format(hit1=hit1, hit2=hit2, real=real,
                                                                 total=total, p=pearson))
 
@@ -231,7 +233,7 @@ class SingleEmbedding:
             embedding_size = int(embedding_size)
             self.vocab = list()
 
-            for index, line in tqdm.tqdm(enumerate(lines[1:])):
+            for index, line in enumerate(lines[1:]):
                 word, vector = line.strip().split(" ", 1)
                 self.vocab.append(word)
                 vector = np.array(vector.split(" ")).astype(float)
@@ -271,6 +273,7 @@ class SingleEmbedding:
                     real_sim_list.append(float(sim))
                     pred_sim_list.append(pred_sim)
         pearson = Util.Pearson(pred_sim_list, real_sim_list)
+        self.pearson_ws353 = pearson
         print('{real}/{total} pearson:{p}'.format(real=real, total=total, p=pearson))
 
     def evalSCWS(self, scws_path):
@@ -287,6 +290,7 @@ class SingleEmbedding:
                     real_sim_list.append(float(_score))
                     pred_sim_list.append(Util.cos_sim(vector_1, vector_2))
         pearson = Util.Pearson(pred_sim_list, real_sim_list)
+        self.pearson_scws = pearson
         print("{real}/{total} pearson:{p}".format(real=real, total=total, p=pearson))
 
 
@@ -483,11 +487,10 @@ class MultiEmbedding:
 
     def get_sim_sense_embedding(self, context_embedding, word):
         """"""
-        use_sense_embedding = False
         cos_sim_list = [Util.cos_sim(context_embedding, vector) for vector in self.senses[word]]
         cos_max_index = np.argmax(cos_sim_list)
         cos_max_value = cos_sim_list[cos_max_index]
-        if cos_max_value < 0.1:
+        if cos_max_value < args.sim_threshold:
             use_sense_embedding = False
             return self.embedding['{0}_1'.format(word)], use_sense_embedding
         else:
@@ -501,8 +504,13 @@ class MultiEmbedding:
                 access_total = sum(self.senses_access[word])
                 main_access = self.senses_access[word][0]
                 sense_access = self.senses_access[word][cos_max_index]
-                return main_access*(main_embedding/access_total) + sense_embedding*(sense_access/access_total), use_sense_embedding
-                # return main_embedding * 0.5 + sense_embedding * 0.5, use_sense_embedding
+                # 如果main的系数是-1的话，那么就说明使用的是main和sense按照access混合的策略
+                if args.main_alpha == -1:
+                    return main_access * (main_embedding / access_total) + sense_embedding * (
+                                sense_access / access_total), use_sense_embedding
+                # 如果main_alpha范围为(0，1]的话，就说明使用的是main和sense按照既定的混合策略
+                else:
+                    return main_embedding * args.main_alpha + sense_embedding * (1 - args.main_alpha), use_sense_embedding
 
 
     def evalSCWS(self, scws_path, use_main):
@@ -547,6 +555,8 @@ if __name__ == "__main__":
     parser.add_argument("-time", dest='time', required=True, type=str, help="词向量路径中的时间戳")
     parser.add_argument("-epoch", dest='epoch', required=True, type=str, help="训练词向量的次数")
     parser.add_argument("-threads", dest='threads', required=True, type=int, help="评测SCWS时候用多线程")
+    parser.add_argument("-sim_threshold", dest='sim_threshold', type=float, help="sense查找时候使用的相似度")
+    parser.add_argument("-main_alpha", dest='main_alpha', type=float, help="main和sense使用的时候的系数")
     args = parser.parse_args()
 
     ws353 = './data/ws/ws353.txt'
@@ -563,8 +573,11 @@ if __name__ == "__main__":
         embedding = MultiEmbedding(args)
         embedding.load2()
         dataset = Dataset()
-        eval = Evaluation2(args, dataset, embedding, True)
-        eval2 = Evaluation2(args, dataset, embedding, False)
+        # 说明只使用main
+        if args.sim_threshold == 1:
+            eval = Evaluation2(args, dataset, embedding, False)
+        else:
+            eval2 = Evaluation2(args, dataset, embedding, True)
         t_end = time.time()
         print(t_end - t_begin)
 
