@@ -95,10 +95,10 @@ class Vocab:
     def build(self):
         """构造词典"""
         print("Build vocab by iterate ", self.args.input)
-        self.vocab_items.append(VocabItem(BOL))
-        self.vocab_items.append(VocabItem(EOL))
-        self.vocab_hash[BOL] = 0
-        self.vocab_hash[EOL] = 1
+        # self.vocab_items.append(VocabItem(BOL))
+        # self.vocab_items.append(VocabItem(EOL))
+        # self.vocab_hash[BOL] = 0
+        # self.vocab_hash[EOL] = 1
 
         # 第一次遍历从文件中读取的数据集
         for line in tqdm.tqdm(self.f_input):
@@ -115,9 +115,9 @@ class Vocab:
                 #     sys.stdout.write("\rReading Words {word_count:>10.2f}k".format(word_count=self.word_count/1000.0))
                 #     sys.stdout.flush()
 
-            self.vocab_items[self.vocab_hash[BOL]].count += 1
-            self.vocab_items[self.vocab_hash[EOL]].count += 1
-            self.word_count += 2
+            # self.vocab_items[self.vocab_hash[BOL]].count += 1
+            # self.vocab_items[self.vocab_hash[EOL]].count += 1
+            # self.word_count += 2
 
         # 第二次遍历内存中的数据集
         print("")

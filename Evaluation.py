@@ -600,7 +600,7 @@ if __name__ == "__main__":
         embedding.count_statistic()
         dataset = Dataset()
         # 说明只使用main
-        if args.sim_threshold == 1:
+        if args.main_alpha == 1:
             eval = Evaluation2(args, dataset, embedding, False)
         else:
             eval2 = Evaluation2(args, dataset, embedding, True)

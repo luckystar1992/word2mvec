@@ -160,18 +160,18 @@ def train_process(pid):
 
                     for target, label in classifiers:
                         z = np.dot(model.net1[context_word], model.net2[target])
-                    if z <= -SIGMOID_MAX_EXP:
-                        continue
-                    elif z >= SIGMOID_MAX_EXP:
-                        continue
-                    else:
-                        table_index = int((z + SIGMOID_MAX_EXP) * (SIGMOID_TABLE_SIZE / SIGMOID_MAX_EXP / 2))
-                    p = args.sigmoid_table[table_index]
-                    g = global_alpha.value * (1 - label - p)
-                    neu1e += g * model.net2[target]
-                    model.net2[target] += g * model.net1[context_word]
+                        if z <= -SIGMOID_MAX_EXP:
+                            continue
+                        elif z >= SIGMOID_MAX_EXP:
+                            continue
+                        else:
+                            table_index = int((z + SIGMOID_MAX_EXP) * (SIGMOID_TABLE_SIZE / SIGMOID_MAX_EXP / 2))
+                        p = args.sigmoid_table[table_index]
+                        g = global_alpha.value * (1 - label - p)
+                        neu1e += g * model.net2[target]
+                        model.net2[target] += g * model.net1[context_word]
 
-                model.net1[context_word] += neu1e
+                    model.net1[context_word] += neu1e
 
 
             word_count += 1
@@ -221,9 +221,9 @@ def multi_train_process(pid):
         if not line:
             continue
         sen_tokens = []
-        sen_tokens.append(FileUtil.BOL)
+        # sen_tokens.append(FileUtil.BOL)
         sen_tokens.extend(line.split())
-        sen_tokens.append(FileUtil.EOL)
+        # sen_tokens.append(FileUtil.EOL)
         tokens_id = vocab.indices(sen_tokens)
 
         # 计算出整个句子的token所在的index
@@ -353,6 +353,31 @@ def multi_train_process(pid):
 
                 # 参数更新
                 for context_id, sense_index in zip(context_ids, current_tokens_sense_index):
+                    model.embedding[context_id][sense_index] += neu1e
+                    model.senses_access[context_id][sense_index] += 1
+            # Skip-Gram模型
+            else:
+                for context_id, sense_index in zip(context_ids, current_tokens_sense_index):
+                    neu1e = np.zeros(args.embedding_size)
+                    if args.negative > 0:
+                        classifiers = [(token, 1)] + [(target, 0) for target in args.table.sample(args.negative)]
+                    else:
+                        classifiers = zip(vocab[token].path, vocab[token].code)
+
+                    for target, label in classifiers:
+                        z = np.dot(model.embedding[context_id][sense_index], model.weights[target])
+                        if z <= -SIGMOID_MAX_EXP:
+                            continue
+                        elif z >= SIGMOID_MAX_EXP:
+                            continue
+                        else:
+                            table_index = int((z + SIGMOID_MAX_EXP) * (SIGMOID_TABLE_SIZE / SIGMOID_MAX_EXP / 2))
+                        p = args.sigmoid_table[table_index]
+                        g = global_alpha.value * (1 - label - p)
+                        neu1e += g * model.weights[target]
+                        model.weights[target] += g * model.embedding[context_id][sense_index]
+
+                    # 参数更新（这里和word2vec有差别)
                     model.embedding[context_id][sense_index] += neu1e
                     model.senses_access[context_id][sense_index] += 1
 
