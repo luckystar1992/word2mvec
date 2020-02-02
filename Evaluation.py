@@ -16,6 +16,7 @@ import multiprocessing
 from multiprocessing import Array, Value, Pool
 import numpy as np
 import warnings
+from collections import Counter
 
 WS353_Path = 'data/ws/ws353.txt'
 WS353_Rela_Path = 'data/ws/ws353_relatedness.txt'
@@ -98,7 +99,7 @@ class Evaluation:
         real = len(pred_list)
         pearson = Util.Pearson(real_list, pred_list)
         self.pearson = pearson
-        print('{hit1}-{hit2}/{real}/{total} pearson:{p:>6.4f}'.format(hit1=hit_list[0], hit2=hit_list[1], real=real, total=total, p=pearson))
+        print('h1:{hit1:>4d} h2:{hit2>4d} {real:>4d}/{total} pearson:{p:>6.4f}'.format(hit1=hit_list[0], hit2=hit_list[1], real=real, total=total, p=pearson))
 
     def getSubSCWS(self, thread_index):
         """获取子子线程需要处理的SCWS行数"""
@@ -159,12 +160,12 @@ class Evaluation2:
         line_index = range(0, len(self.realSCWS) + interval, interval)
 
         # 更新参数项并将需要统计的word1和word2的命中统计数目更新到args中
-        args.start_list = line_index[0:-1]
-        args.end_list = line_index[1:]
-        args.use_context = use_context
+        self.args.start_list = line_index[0:-1]
+        self.args.end_list = line_index[1:]
+        self.args.use_context = use_context
         word1_hit, word2_hit = Value('i', 0), Value('i', 0)
-        args.word1_hit = word1_hit
-        args.word2_hit = word2_hit
+        self.args.word1_hit = word1_hit
+        self.args.word2_hit = word2_hit
 
         pool = Pool(processes=self.args.threads,
                     initializer=Evaluation2.init_worker,
@@ -180,7 +181,7 @@ class Evaluation2:
         total = len(self.dataset.SCWS)
         pearson = Util.Pearson(pred_list, real_list)
         self.pearson = pearson
-        print('{hit1}-{hit2}/{real}/{total} pearson:{p:>6.4f}'.format(hit1=hit1, hit2=hit2, real=real,
+        print('h1:{hit1:>4d} h2:{hit2:>4d} {real:>4d}/{total} pearson:{p:>6.4f}'.format(hit1=hit1, hit2=hit2, real=real,
                                                                 total=total, p=pearson))
 
     @classmethod
@@ -214,6 +215,24 @@ class Evaluation2:
             # list的话，多线程会出现错位的现象
             simArray[start+index][0] = pred_sim
             simArray[start+index][1] = float(_score)
+
+    def count_multi_hit(self):
+        """
+        统计scws的有效例子中有多少个是多义词，同时统计word1和word2
+        :return:
+        """
+        s1, s2, s3 = 0, 0, 0
+        for sample in self.realSCWS:
+            word1 = sample[0]
+            word2 = sample[2]
+            if self.embedding.senses_count[word1] > 1:
+                s1 += 1
+            if self.embedding.senses_count[word2] > 1:
+                s2 += 1
+            if self.embedding.senses_count[word1] > 1 or self.embedding.senses_count[word2] > 1:
+                s3 += 1
+        print("s1:{s1:>4d} s2:{s2:>4d} {s3:>4d}/{s4}".format(s1=s1, s2=s2, s3=s3, s4=len(self.realSCWS)))
+
 
 class SingleEmbedding:
     """单一语境词向量"""
@@ -423,6 +442,12 @@ class MultiEmbedding:
             for sense_index, vector in enumerate(sense_vectors):
                 sensesArray[array_index][sense_index] = vector
 
+    def count_statistic(self):
+        """将不同sense出现次数进行统计"""
+        counter = Counter(self.senses_count.values())
+        print("Count statistic of {path}".format(path=self.count_path))
+        for key, value in sorted(counter.most_common(), key=lambda x: x[0]):
+            print("{key:>2d}: {value1:>6d} {value2:>6.2f}% ".format(key=key, value1=value, value2=value*100/len(self.senses_count)))
 
     def most_similar(self, word, top_n=5):
         if word not in self.vocab:
@@ -572,12 +597,13 @@ if __name__ == "__main__":
         t_begin = time.time()
         embedding = MultiEmbedding(args)
         embedding.load2()
+        embedding.count_statistic()
         dataset = Dataset()
         # 说明只使用main
         if args.sim_threshold == 1:
             eval = Evaluation2(args, dataset, embedding, False)
         else:
             eval2 = Evaluation2(args, dataset, embedding, True)
+            eval2.count_multi_hit()
         t_end = time.time()
-        print(t_end - t_begin)
 
