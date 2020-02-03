@@ -150,10 +150,6 @@ class Evaluation2:
         for sample in self.dataset.SCWS:
             if sample[0] in self.embedding.vocab and sample[2] in self.embedding.vocab:
                 self.realSCWS.append(sample)
-        # 建立共享内存用于多线程worker的共享使用  两个列向量，real sim 和 pred sim 两个相似度
-        tmp = np.zeros(shape=(len(self.realSCWS), 2))
-        simArray = np.ctypeslib.as_ctypes(tmp)
-        simArray = Array(simArray._type_, simArray, lock=False)
 
         # 计算每个线程处理的有效scws的行起终点
         interval = int(np.ceil(len(self.realSCWS)/args.threads))
@@ -163,13 +159,23 @@ class Evaluation2:
         self.args.start_list = line_index[0:-1]
         self.args.end_list = line_index[1:]
         self.args.use_context = use_context
+
+    def eval(self, sim_type):
+        """实现Huang2012提出的4种不同相似度的评测方法"""
+        # 建立共享内存用于多线程worker的共享使用  两个列向量，real sim 和 pred sim 两个相似度
+        assert sim_type in ['global', 'average', 'averagec', 'local']
+        tmp = np.zeros(shape=(len(self.realSCWS), 2))
+        simArray = np.ctypeslib.as_ctypes(tmp)
+        simArray = Array(simArray._type_, simArray, lock=False)
+
         word1_hit, word2_hit = Value('i', 0), Value('i', 0)
         self.args.word1_hit = word1_hit
         self.args.word2_hit = word2_hit
+        self.args.sim_type = sim_type
 
         pool = Pool(processes=self.args.threads,
                     initializer=Evaluation2.init_worker,
-                    initargs=(args, embedding, self.realSCWS, simArray))
+                    initargs=(self.args, self.embedding, self.realSCWS, simArray))
         pool.map(Evaluation2.run_worker, range(0, self.args.threads))
 
         pred_list = [item[0] for item in simArray]
@@ -181,7 +187,7 @@ class Evaluation2:
         total = len(self.dataset.SCWS)
         pearson = Util.Pearson(pred_list, real_list)
         self.pearson = pearson
-        print('h1:{hit1:>4d} h2:{hit2:>4d} {real:>4d}/{total} pearson:{p:>6.4f}'.format(hit1=hit1, hit2=hit2, real=real,
+        print('h1:{hit1:>4d} h2:{hit2:>4d} {real:>4d}/{total} pearson:{p:>6.4f}({sim_type:>8s})'.format(sim_type=sim_type, hit1=hit1, hit2=hit2, real=real,
                                                                 total=total, p=pearson))
 
     @classmethod
@@ -198,23 +204,78 @@ class Evaluation2:
         start = args.start_list[thread_index]
         end = args.end_list[thread_index]
         for index, (_word1, _pos1, _word2, _pos2, _sen1, _sen2, _score) in enumerate(scws[start: end]):
-            if args.use_context:
-                context_embedding1 = embedding.get_context_embedding(_sen1)
-                context_embedding2 = embedding.get_context_embedding(_sen2)
+            if args.sim_type == 'averagec':
+                global_sim = 0
+                word1_access = embedding.senses_access[_word1]
+                word2_access = embedding.senses_access[_word2]
+                word1_access_total = sum(word1_access)
+                word2_access_total = sum(word2_access)
+                for index1, access1 in enumerate(word1_access):
+                    p1 = access1 / word1_access_total
+                    embedd1 = embedding.embedding["{word}_{index}".format(word=_word1, index=index1 + 1)]
+                    for index2, access2 in enumerate(word2_access):
+                        p2 = access2 / word2_access_total
+                        embedd2 = embedding.embedding["{word}_{index}".format(word=_word2, index=index2+1)]
+                        global_sim += p1 * p2 * Util.cos_sim(embedd1, embedd2)
+                #global_sim /= word1_count * word2_count
+                simArray[start+index][0] = global_sim
+                simArray[start+index][1] = float(_score)
+
+            elif args.sim_type == 'average':
+                global_sim = 0
+                word1_count = embedding.senses_count[_word1]
+                word2_count = embedding.senses_count[_word2]
+                for index1 in range(0, word1_count):
+                    embedd1 = embedding.embedding["{word}_{index}".format(word=_word1, index=index1+1)]
+                    for index2 in range(0, word2_count):
+                        embedd2 = embedding.embedding["{word}_{index}".format(word=_word2, index=index2+1)]
+                        global_sim += Util.cos_sim(embedd1, embedd2)
+                global_sim /= word1_count * word2_count
+                simArray[start + index][0] = global_sim
+                simArray[start + index][1] = float(_score)
+
+            elif args.sim_type == 'global':
+                vector1 = embedding.embedding["{word}_1".format(word=_word1)]
+                vector2 = embedding.embedding["{word}_1".format(word=_word2)]
+                simArray[start+index][0] = Util.cos_sim(vector1, vector2)
+                simArray[start+index][1] = float(_score)
+
+            # 这个应该是最复杂的一个评测方法，需要通过word的context embedding进行确切word embedding的查找
+            # 最后通过确切查找出来的两个index进行 cos的确定
+            elif args.sim_type == 'local':
+                context_embedding1 = embedding.get_context_embedding(_sen1, args.window_size)
+                context_embedding2 = embedding.get_context_embedding(_sen2, args.window_size)
                 vector1, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding1, _word1)
                 if use_sense_embedding:
                     args.word1_hit.value += 1
                 vector2, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding2, _word2)
                 if use_sense_embedding:
                     args.word2_hit.value += 1
+                local_sim = Util.cos_sim(vector1, vector2)
+                simArray[start + index][0] = local_sim
+                simArray[start + index][1] = float(_score)
+            elif args.sim_type == 'local1':
+                pass
             else:
-                vector1 = embedding.embedding["{word}_1".format(word=_word1)]
-                vector2 = embedding.embedding["{word}_1".format(word=_word2)]
-            pred_sim = Util.cos_sim(vector1, vector2)
-            # 在这里append的时候一定要将两者同时append到list中去，如果是两个不同的
-            # list的话，多线程会出现错位的现象
-            simArray[start+index][0] = pred_sim
-            simArray[start+index][1] = float(_score)
+                raise NameError
+
+            # if args.use_context:
+            #     context_embedding1 = embedding.get_context_embedding(_sen1)
+            #     context_embedding2 = embedding.get_context_embedding(_sen2)
+            #     vector1, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding1, _word1)
+            #     if use_sense_embedding:
+            #         args.word1_hit.value += 1
+            #     vector2, use_sense_embedding = embedding.get_sim_sense_embedding(context_embedding2, _word2)
+            #     if use_sense_embedding:
+            #         args.word2_hit.value += 1
+            # else:
+            #     vector1 = embedding.embedding["{word}_1".format(word=_word1)]
+            #     vector2 = embedding.embedding["{word}_1".format(word=_word2)]
+            # pred_sim = Util.cos_sim(vector1, vector2)
+            # # 在这里append的时候一定要将两者同时append到list中去，如果是两个不同的
+            # # list的话，多线程会出现错位的现象
+            # simArray[start+index][0] = pred_sim
+            # simArray[start+index][1] = float(_score)
 
     def count_multi_hit(self):
         """
@@ -500,14 +561,14 @@ class MultiEmbedding:
         pearson = Util.Pearson(pred_sim_list, real_sim_list)
         print('{real}/{total} pearson:{p}'.format(real=real, total=total, p=pearson))
 
-    def get_context_embedding(self, sentences):
+    def get_context_embedding(self, sentences, window_size):
         """在scws评测中，获取context embedding，并得到最对应的sense的索引"""
         # 测评数据集中有的有多个word，或者是有的<b> </b>中间的单词和给定的单词大小写不一致
         left_context = sentences.split("<b>")[0]
         right_context = sentences.split("</b>")[1]
-        left_context_embedding = [self.embedding['{0}_1'.format(word)] for word in left_context.split(" ") if word in self.vocab]
+        left_context_embedding = [self.embedding['{0}_1'.format(word)] for word in left_context.split(" ")[::-1] if word in self.vocab]
         right_context_embedding = [self.embedding['{0}_1'.format(word)] for word in right_context.split(" ") if word in self.vocab]
-        context_embedding = np.mean(left_context_embedding[0:5] + right_context_embedding[0:5], axis=0)
+        context_embedding = np.mean(left_context_embedding[0:window_size] + right_context_embedding[0:window_size], axis=0)
         return context_embedding
 
     def get_sim_sense_embedding(self, context_embedding, word):
@@ -582,6 +643,7 @@ if __name__ == "__main__":
     parser.add_argument("-threads", dest='threads', required=True, type=int, help="评测SCWS时候用多线程")
     parser.add_argument("-sim_threshold", dest='sim_threshold', type=float, help="sense查找时候使用的相似度")
     parser.add_argument("-main_alpha", dest='main_alpha', type=float, help="main和sense使用的时候的系数")
+    parser.add_argument("-window_size", dest="window_size", type=int, help="寻找上下文的窗口大学")
     args = parser.parse_args()
 
     ws353 = './data/ws/ws353.txt'
@@ -602,8 +664,17 @@ if __name__ == "__main__":
         # 说明只使用main
         if args.main_alpha == 1:
             eval = Evaluation2(args, dataset, embedding, False)
+            eval.count_multi_hit()
+            eval.eval('global')
+            eval.eval('average')
+            eval.eval('averagec')
+            eval.eval('local')
         else:
             eval2 = Evaluation2(args, dataset, embedding, True)
             eval2.count_multi_hit()
+            eval2.eval('global')
+            eval2.eval('average')
+            eval2.eval('averagec')
+            eval2.eval('local')
         t_end = time.time()
 
